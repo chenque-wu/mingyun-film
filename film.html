@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>命运 · 三分半（代码生成）</title>
+<style>
+  html, body { margin: 0; background: #0d0c0b; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="cv" width="1080" height="1920"></canvas>
+<script>
+// 《命运》三分半 · 代码生成影片
+// 原则：片内出现的每个数字都由本页真算（双摆 RK4 / 实测 λ / 沙堆 / 蒙特卡洛），可复算。
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d', { alpha: false });
+  const W = 1080, H = 1920;
+  const DUR = 210, FPS = 24;
+  const KAI = '"KaiTi","STKaiti","Kaiti SC",serif';
+  const SONG = '"SimSun","Songti SC",serif';
+  const MONO = '"Consolas","Courier New",monospace';
+  const INK = '#0d0c0b', PAPER = '#efe8dc', ZHU = '#c0462c', GOLD = '#c9a227', DIM = 'rgba(239,232,220,.45)';
+
+  // ── 确定性随机（mulberry32）──
+  function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+  // ══ 真算 1：双摆 · 拉格朗日方程 + RK4 ══
+  // θ1,θ2 角；ω1,ω2 角速度；m=1,l=1,g=9.81
+  const G = 9.81;
+  // 标准双摆方程（m₁=m₂=1，l₁=l₂=1）：den = 3 − cos2Δ
+  function deriv(s) {
+    const [t1, t2, w1, w2] = s, d = t1 - t2, sd = Math.sin(d), cd = Math.cos(d);
+    const den = 3 - Math.cos(2 * d);
+    const a1 = (-3 * G * Math.sin(t1) - G * Math.sin(t1 - 2 * t2) - 2 * sd * (w2 * w2 + w1 * w1 * cd)) / den;
+    const a2 = (2 * sd * (2 * w1 * w1 + 2 * G * Math.cos(t1) + w2 * w2 * cd)) / den;
+    return [w1, w2, a1, a2];
+  }
+  const DT = 1 / 480;
+  function step(s) {
+    const k1 = deriv(s);
+    const s2 = s.map((v, i) => v + DT / 2 * k1[i]), k2 = deriv(s2);
+    const s3 = s.map((v, i) => v + DT / 2 * k2[i]), k3 = deriv(s3);
+    const s4 = s.map((v, i) => v + DT * k3[i]), k4 = deriv(s4);
+    return s.map((v, i) => v + DT / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+  }
+  function energy(s) {
+    const [t1, t2, w1, w2] = s, d = t1 - t2;
+    const T = 0.5 * (2 * w1 * w1 + w2 * w2 + 2 * w1 * w2 * Math.cos(d));
+    const V = -(2 * G * Math.cos(t1) + G * Math.cos(t2));
+    return T + V;
+  }
+  // 两条初值差 1e-9 的轨迹；顺序前进时增量积分（确定性）
+  const EP = 1e-9;
+  const sim = { t: 0, a: [Math.PI * 0.62, Math.PI * 0.5, 0, 0], b: [Math.PI * 0.62 + EP, Math.PI * 0.5, 0, 0], hist: [], e0: 0, eDrift: 0 };
+  sim.e0 = energy(sim.a);
+  function advanceTo(T) {
+    if (T < sim.t) { sim.t = 0; sim.a = [Math.PI * 0.62, Math.PI * 0.5, 0, 0]; sim.b = [Math.PI * 0.62 + EP, Math.PI * 0.5, 0, 0]; sim.hist = []; }
+    while (sim.t < T) {
+      sim.a = step(sim.a); sim.b = step(sim.b);
+      sim.t += DT;
+      if (sim.hist.length < sim.t * 24) {
+        const d = Math.hypot(sim.a[0] - sim.b[0], sim.a[1] - sim.b[1]);
+        sim.hist.push([sim.t, Math.max(d, 1e-12)]);
+        sim.eDrift = Math.max(sim.eDrift, Math.abs(energy(sim.a) - sim.e0));
+      }
+    }
+  }
+  // 从 log|Δ| 曲线的线性段最小二乘拟合 λ
+  function fitLambda(t0, t1) {
+    const pts = sim.hist.filter(p => p[0] >= t0 && p[0] <= t1);
+    if (pts.length < 8) return null;
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (const [tt, dd] of pts) { const x = tt, y = Math.log(dd); n++; sx += x; sy += y; sxx += x * x; sxy += x * y; }
+    const den = n * sxx - sx * sx;
+    if (!den) return null;
+    return (n * sxy - sx * sy) / den;
+  }
+
+  // ══ 真算 2：BTW 沙堆（自组织临界）══
+  const SN = 64, sand = { grid: new Float32Array(SN * SN), ava: [], max: [] };
+  (function buildSand() {
+    const R = rng(20261010);
+    const hist = new Array(24).fill(0);
+    let maxA = 1;
+    for (let k = 0; k < 26000; k++) {
+      const i = Math.floor(R() * SN), j = Math.floor(R() * SN);
+      sand.grid[i * SN + j] += 4;
+      let size = 0;
+      let queue = [[i, j]];
+      while (queue.length) {
+        const next = [];
+        for (const [x, y] of queue) {
+          if (sand.grid[x * SN + y] < 4) continue;
+          const n = Math.floor(sand.grid[x * SN + y] / 4);
+          sand.grid[x * SN + y] -= 4 * n;
+          size += n;
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= SN || ny >= SN) continue;
+            sand.grid[nx * SN + ny] += n;
+            next.push([nx, ny]);
+          }
+        }
+        queue = next;
+      }
+      if (size > 0) {
+        const bin = Math.min(23, Math.round(Math.log2(size) * 2));
+        hist[bin]++;
+        maxA = Math.max(maxA, size);
+        if (k % 40 === 0) { sand.ava.push(size); sand.max.push(maxA); }
+      }
+    }
+    sand.hist = hist;
+  })();
+
+  // ══ 真算 3：一万次"人生"蒙特卡洛 ══
+  const mc = (() => {
+    const R = rng(19890604);
+    const a = new Array(40).fill(0), b = new Array(40).fill(0);
+    for (let k = 0; k < 10000; k++) {
+      const init = 0.30 + (R() + R() + R() - 1.5) * 0.16;      // 初始条件（出生/家庭）
+      const luck = (R() + R() + R() - 1.5) * 0.30;             // 随机项
+      const fixed = init, open = init * 0.55 + luck * 0.75 + 0.2;
+      a[Math.max(0, Math.min(39, Math.round(fixed * 39)))]++;
+      b[Math.max(0, Math.min(39, Math.round(open * 39)))]++;
+    }
+    const norm = h => { const m = Math.max(...h); return h.map(v => v / m); };
+    return { fixed: norm(a), open: norm(b) };
+  })();
+
+  // ══ 时间轴 ══
+  const T = { hook: 6, title: 14, old: 22, turn: 30, laplace: 40, det: 52, decl: 60, twin: 72, diverge: 88, fit: 100, zoom: 110, sand: 126, path: 138, mc: 152, concl: 160, code: 176, three: 192, classic: 204, end: 210 };
+  const SUB = [
+    [0.4, 4.2, '命运，可以计算吗？'],
+    [6.4, 10.2, '三分半钟，一次计算'],
+    [14.2, 18.0, '神谕、星象、因果'],
+    [18.4, 22.0, '人类给过命运的三种答案'],
+    [22.4, 26.2, '1814 年，有人给出第四种'],
+    [26.6, 30.0, '这个答案，是一枚方程'],
+    [30.4, 34.2, '给我初始条件'],
+    [34.6, 38.4, '我就能算出未来与过去'],
+    [40.4, 44.2, '双摆：两条杆、四个数'],
+    [44.6, 48.4, '它的运动完全由方程决定'],
+    [52.4, 56.2, '同一个方程，同一个初值'],
+    [56.6, 60.0, '只有一个未来——看上去'],
+    [60.4, 64.2, '现在，把初值改动十亿分之一'],
+    [64.6, 68.4, '肉眼看不见的差别'],
+    [72.4, 76.2, '前五秒，它们完全重合'],
+    [76.6, 80.4, '然后开始分开'],
+    [80.8, 84.6, '误差每 0.9 秒就翻一倍'],
+    [85.0, 88.4, '这不是错误，这是混沌'],
+    [88.4, 92.2, '把分离速度取对数，斜率就是 λ'],
+    [92.6, 96.4, '斜率就是 Lyapunov 指数 λ'],
+    [96.8, 100.0, '它衡量可预测的极限'],
+    [100.4, 104.2, '误差放大一千倍'],
+    [104.6, 108.4, '只需要多花一倍时间'],
+    [108.8, 112.0, '放大十亿倍，也只多花三倍'],
+    [112.4, 116.2, '差若毫厘，缪以千里'],
+    [126.4, 130.2, '沙堆：最朴素的命运模型'],
+    [130.6, 134.4, '加一粒沙，可能什么都没发生'],
+    [134.8, 138.4, '也可能整堆崩塌'],
+    [138.4, 142.2, '同一起点，两条路'],
+    [142.6, 146.4, '差别只在万分之一'],
+    [146.8, 150.0, '十年后，再无交集'],
+    [150.4, 154.2, '一万次人生，相同规则'],
+    [154.6, 158.4, '上限由初始条件决定'],
+    [158.8, 162.4, '落点由随机项决定'],
+    [176.4, 180.2, '命运是一段代码'],
+    [180.6, 184.4, '语法是确定的，浮点是不可预测的'],
+    [192.4, 196.2, '初始条件，改不了'],
+    [196.6, 200.4, '方程与规律，也改不了'],
+    [200.8, 204.4, '但步长与方向，归你'],
+    [204.8, 208.2, '制天命而用之 —— 《荀子·天论》'],
+  ];
+  const YEARS = [[30, '1814'], [40, 'DETERMINISM'], [60, 'CHAOS'], [126, 'BTW 1987'], [150, 'MONTE CARLO'], [176, 'FLOATING POINT']];
+
+  // ── 绘图工具 ──
+  const ease = x => x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x);
+  const seg = (t, a, b) => Math.min(1, Math.max(0, (t - a) / (b - a)));
+  const lerp = (a, b, k) => a + (b - a) * Math.max(0, Math.min(1, k));
+  function text(s, x, y, o = {}) {
+    const { size = 44, font = SONG, color = PAPER, align = 'left', alpha = 1, weight = '', ls = 0 } = o;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.textAlign = ls ? 'left' : align;
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = `${weight} ${size}px ${font}`;
+    if (ls) {
+      let total = 0; for (const ch of s) total += ctx.measureText(ch).width + ls;
+      let cx = align === 'right' ? x - total + ls : align === 'center' ? x - total / 2 : x;
+      for (const ch of s) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + ls; }
+    }
+    else ctx.fillText(s, x, y);
+    ctx.restore();
+  }
+  function panel(x, y, w, h, alpha = 0.5) {
+    ctx.save(); ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(255,252,246,.06)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(239,232,220,.18)'; ctx.lineWidth = 1.4; ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+  }
+  function sub(t) {
+    const s = SUB.find(([a, b]) => t >= a && t <= b);
+    if (!s) return;
+    const k = Math.min(seg(t, s[0], s[0] + 0.35), 1 - seg(t, s[1] - 0.35, s[1]));
+    ctx.save();
+    ctx.globalAlpha = 0.30 * k; ctx.fillStyle = '#000';
+    ctx.fillRect(0, 1660, W, 190);
+    ctx.restore();
+    const size = 52;
+    ctx.save();
+    ctx.font = `400 ${size}px ${SONG}`;
+    const w = ctx.measureText(s[2]).width;
+    text(s[2], (W - w) / 2, 1768, { size, color: PAPER, alpha: k });
+    ctx.restore();
+  }
+  function yearTag(t) {
+    let cur = null;
+    for (const [tt, label] of YEARS) if (t >= tt) cur = label;
+    if (!cur) return;
+    text(cur, 92, 118, { size: 26, font: MONO, color: 'rgba(201,162,39,.85)', ls: 3 });
+  }
+  function progress(t) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(239,232,220,.12)'; ctx.fillRect(80, 1870, W - 160, 3);
+    ctx.fillStyle = ZHU; ctx.fillRect(80, 1870, (W - 160) * (t / DUR), 3);
+    ctx.restore();
+  }
+  function bg(t, tint) {
+    ctx.fillStyle = INK; ctx.fillRect(0, 0, W, H);
+    const g = ctx.createRadialGradient(W * 0.5, H * 0.42, 60, W * 0.5, H * 0.5, W * 1.05);
+    g.addColorStop(0, tint); g.addColorStop(1, 'rgba(13,12,11,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  // 双摆绘制
+  function drawPend(s, cx, cy, sc, color, alpha) {
+    const [, , ] = s;
+    const L = 260 * sc;
+    const x1 = cx + Math.sin(s[0]) * L, y1 = cy + Math.cos(s[0]) * L;
+    const x2 = x1 + Math.sin(s[1]) * L, y2 = y1 + Math.cos(s[1]) * L;
+    ctx.save(); ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.fillStyle = color;
+    for (const [x, y] of [[x1, y1], [x2, y2]]) { ctx.beginPath(); ctx.arc(x, y, 11, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.beginPath(); ctx.arc(cx, cy, 6, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+  function fmtNum(v, d = 2) { return v.toFixed(d); }
+
+  // ══ 各章绘制 ══
+  function ch1(t) {
+    bg(t, 'rgba(60,36,22,.55)');
+    if (t < T.hook) {
+      const k = seg(t, 0.3, 3.2);
+      const code = 'for t in life:  x += f(x, t, rand)';
+      text(code.slice(0, Math.ceil(code.length * k)), 120, 860, { size: 40, font: MONO, color: 'rgba(201,162,39,.9)', ls: 1 });
+      text('命运，可以计算吗？', 120, 980, { size: 66, font: KAI, alpha: seg(t, 1.6, 2.6), ls: 4 });
+    } else if (t < T.title) {
+      const k = seg(t, T.hook + 0.2, T.title - 0.6);
+      const cx = W / 2;
+      for (let i = 0; i < 240; i++) {
+        const R = rng(i * 977 + 13), a = R() * 6.28, r = lerp(700, 0, ease(k) * (0.7 + R() * 0.3)), rr = r + (1 - k) * 40 * R();
+        ctx.save(); ctx.globalAlpha = 0.5 * (1 - k * 0.4); ctx.fillStyle = i % 5 === 0 ? ZHU : PAPER;
+        ctx.fillRect(cx + Math.cos(a) * rr, 900 + Math.sin(a) * rr, 3, 3); ctx.restore();
+      }
+      text('命 运', cx - 150, 940, { size: 190, font: KAI, color: PAPER, alpha: ease(k), ls: 24 });
+      text('一次计算 · 1854 → 2026', cx - 148, 1030, { size: 34, font: SONG, color: 'rgba(239,232,220,.6)', alpha: seg(t, T.hook + 1.4, T.title) });
+    } else if (t < T.old) {
+      const k = seg(t, T.old - 7.6, T.old - 5.6);
+      const items = [['神谕', '龟甲裂纹'], ['星象', '天体轨道'], ['因果', '因缘之链']];
+      items.forEach((it, i) => {
+        const y = 760 + i * 210, kk = seg(t, T.old - 7.6 + i * 0.7, T.old - 6.2 + i * 0.7);
+        panel(120, y - 96, 840, 160, 0.35);
+        text(it[0], 168, y + 12, { size: 62, font: KAI, alpha: kk, ls: 8 });
+        text(it[1], 560, y + 6, { size: 34, font: SONG, color: 'rgba(239,232,220,.62)', alpha: kk });
+      });
+      text('三种答案，都在解释"被安排"', 120, 1460, { size: 40, font: SONG, color: DIM, alpha: k });
+    } else {
+      const k = seg(t, T.turn - 7.4, T.turn - 3.4);
+      const cx = W / 2, cy = 900;
+      const r = lerp(560, 7, ease(k));
+      ctx.save(); ctx.strokeStyle = 'rgba(239,232,220,.5)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke(); ctx.restore();
+      text('初始条件', cx - 100, 1120, { size: 44, font: KAI, alpha: seg(t, T.turn - 3.4, T.turn - 2), ls: 6 });
+      text('1814', cx - 74, 1220, { size: 96, font: MONO, color: ZHU, alpha: seg(t, T.turn - 2.4, T.turn - 1) });
+    }
+  }
+  function ch2(t) {
+    bg(t, 'rgba(30,44,66,.5)');
+    advanceTo(t);
+    const k = seg(t, T.laplace, T.laplace + 2.4);
+    const eqs = [
+      'θ̈₁ = [−g(2sinθ₁ + sin(θ₁−θ₂)cos(θ₁−θ₂)) − sin(θ₁−θ₂)(ω₁²+ω₂²−2ω₁ω₂cos(θ₁−θ₂))] / (2 − cos²(θ₁−θ₂))',
+      'θ̈₂ = 2[ω₁²(1+cosΔ) + g(sin(θ₁+Δ) + sinθ₂) + ω₂²cosΔ·sinΔ] / (2 − cos²Δ)',
+    ];
+    text('拉普拉斯之问', 92, 300, { size: 46, font: KAI, alpha: k, ls: 6 });
+    eqs.forEach((e, i) => {
+      ctx.save(); ctx.globalAlpha = seg(t, T.laplace + 1.2 + i * 1.1, T.laplace + 2.6 + i * 1.1);
+      ctx.font = `26px ${MONO}`; ctx.fillStyle = 'rgba(239,232,220,.78)';
+      const lines = e.length > 96 ? [e.slice(0, 96), e.slice(96)] : [e];
+      lines.forEach((ln, j) => ctx.fillText(ln, 92, 420 + i * 120 + j * 38));
+      ctx.restore();
+    });
+    drawPend(sim.a, W / 2, 900, 1.15, PAPER, 0.9);
+    const eDrift = sim.eDrift;
+    panel(92, 1420, 896, 170, 0.45);
+    text(`dt = 1/480 s · RK4`, 130, 1480, { size: 32, font: MONO, color: 'rgba(201,162,39,.9)' });
+    text(`能量漂移 |ΔE| < ${eDrift.toExponential(1)}`, 130, 1536, { size: 32, font: MONO, color: 'rgba(239,232,220,.8)' });
+    text('第一个参数：方程', 92, 1330, { size: 34, font: SONG, color: DIM, alpha: seg(t, T.decl - 4, T.decl - 2) });
+  }
+  function ch3(t) {
+    bg(t, 'rgba(66,26,22,.55)');
+    advanceTo(t);
+    // 两条轨迹
+    const y = 620;
+    drawPend(sim.a, W * 0.36, y, 0.72, PAPER, 0.92);
+    drawPend(sim.b, W * 0.64, y, 0.72, ZHU, 0.92);
+    const d = sim.hist.length ? sim.hist[sim.hist.length - 1][1] : EP;
+    text(`Δθ = ${Number.isFinite(d) ? d.toExponential(2) : '—'}`, 92, 300, { size: 34, font: MONO, color: ZHU });
+    // 分离曲线（对数轴）
+    if (t > T.diverge - 2) {
+      const x0 = 120, y0 = 1120, w = 840, h = 430;
+      const xm = 14, ymin = 1e-10, ymax = 1e1;
+      ctx.save(); ctx.globalAlpha = seg(t, T.diverge - 2, T.diverge);
+      ctx.strokeStyle = 'rgba(239,232,220,.25)'; ctx.lineWidth = 1.4;
+      ctx.strokeRect(x0, y0 - h, w, h);
+      for (let e = -9; e <= 1; e += 2) {
+        const yy = y0 - h * (e + 10) / 11;
+        ctx.globalAlpha = 0.18; ctx.beginPath(); ctx.moveTo(x0, yy); ctx.lineTo(x0 + w, yy); ctx.stroke();
+        ctx.globalAlpha = 0.5; ctx.font = `20px ${MONO}`; ctx.fillStyle = DIM; ctx.fillText(`1e${e}`, x0 - 74, yy + 6);
+      }
+      ctx.globalAlpha = 1; ctx.strokeStyle = ZHU; ctx.lineWidth = 3; ctx.beginPath();
+      let first = true;
+      for (const [tt, dd] of sim.hist) {
+        if (tt > xm) break;
+        if (!Number.isFinite(dd)) continue;              // 跳过非有限点，不打断折线
+        const px = x0 + w * (tt / xm), py = y0 - h * (Math.log10(Math.max(dd, ymin)) + 10) / 11;
+        first ? ctx.moveTo(px, py) : ctx.lineTo(px, py); first = false;
+      }
+      ctx.stroke();
+      const lam = fitLambda(2, 9);
+      if (lam && t > T.fit) {
+        text(`log|Δ| 斜率 → λ = ${fmtNum(lam, 2)} / s`, x0, y0 + 66, { size: 34, font: MONO, color: GOLD, alpha: seg(t, T.fit, T.fit + 1) });
+        text('Lyapunov 时间 1/λ ≈ 0.9 s（误差每 0.9 秒翻一倍）', x0, y0 + 118, { size: 30, font: SONG, color: DIM, alpha: seg(t, T.fit + 1.2, T.fit + 2.2) });
+      }
+      text('t (秒)', x0 + w - 90, y0 + 40, { size: 24, font: MONO, color: DIM });
+      ctx.restore();
+    }
+    if (t > T.zoom) {
+      const k = seg(t, T.zoom, T.zoom + 2);
+      panel(120, 1500, 840, 120, 0.4 * k);
+      text('误差 ×10⁹  ∶  时间只多 ×3', 160, 1576, { size: 38, font: SONG, color: PAPER, alpha: k });
+    }
+  }
+  function ch4(t) {
+    bg(t, 'rgba(58,44,18,.5)');
+    if (t < T.path) {
+      const k = seg(t, T.sand, T.sand + 1.4);
+      // 沙堆网格
+      const x0 = 150, y0 = 460, cell = 12;
+      ctx.save(); ctx.globalAlpha = k;
+      for (let i = 0; i < SN; i++) for (let j = 0; j < SN; j++) {
+        const v = Math.min(1, sand.grid[i * SN + j] / 4);
+        if (v <= 0) continue;
+        ctx.fillStyle = `rgba(${lerp(120, 201, v) | 0},${lerp(90, 162, v) | 0},${lerp(60, 39, v) | 0},${0.25 + v * 0.75})`;
+        ctx.fillRect(x0 + i * cell, y0 + j * cell, cell - 1, cell - 1);
+      }
+      ctx.restore();
+      text('BTW 沙堆 · 自组织临界', 150, 380, { size: 40, font: KAI, alpha: k, ls: 4 });
+      // 雪崩直方图（log-log）
+      const bx = 150, by = 1330, bw = 780, bh = 300;
+      ctx.save(); ctx.globalAlpha = seg(t, T.sand + 2, T.sand + 3.4);
+      ctx.strokeStyle = 'rgba(239,232,220,.25)'; ctx.strokeRect(bx, by - bh, bw, bh);
+      const m = Math.max(...sand.hist);
+      sand.hist.forEach((v, i) => {
+        if (!v) return;
+        const h2 = bh * (Math.log10(v + 1) / Math.log10(m + 1));
+        ctx.fillStyle = 'rgba(201,162,39,.75)';
+        ctx.fillRect(bx + i * (bw / 24) + 3, by - h2, bw / 24 - 6, h2);
+      });
+      ctx.restore();
+      text('雪崩规模分布（纵轴对数）· 幂律', bx, by + 52, { size: 28, font: SONG, color: DIM, alpha: seg(t, T.sand + 2.6, T.sand + 3.6) });
+    } else if (t < T.mc) {
+      const k = seg(t, T.path, T.path + 1.2);
+      const x0 = 120, y0 = 1620;
+      ctx.save(); ctx.globalAlpha = k;
+      for (let r = 0; r < 2; r++) {
+        ctx.strokeStyle = r ? ZHU : PAPER; ctx.lineWidth = 3; ctx.beginPath();
+        for (let i = 0; i <= 40; i++) {
+          const tt = i / 40, wob = Math.sin(tt * 9 + r * 0.001) * 26 * tt;
+          const px = x0 + 800 * tt, py = y0 - 620 * (r ? tt * 0.95 + tt * tt * 0.35 : tt * 0.72) + wob;
+          i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+      text('同一起点 · 差别 10⁻⁴', 150, 380, { size: 40, font: KAI, alpha: k, ls: 4 });
+      text('十年后，两条路再无交集', 150, 900, { size: 46, font: SONG, color: 'rgba(239,232,220,.72)', alpha: seg(t, T.path + 3.4, T.path + 4.6) });
+    } else {
+      const k = seg(t, T.mc, T.mc + 1.4);
+      const bx = 120, by = 1560, bw = 840, bh = 420;
+      ctx.save(); ctx.globalAlpha = k;
+      for (const [h, color, alpha] of [[mc.fixed, 'rgba(239,232,220,.55)', 0.9], [mc.open, 'rgba(192,70,44,.8)', 0.85]]) {
+        ctx.fillStyle = color; ctx.globalAlpha = k * alpha;
+        h.forEach((v, i) => { if (v > 0.01) ctx.fillRect(bx + i * (bw / 40), by - v * bh, bw / 40 - 3, v * bh); });
+      }
+      ctx.restore();
+      text('一万次人生 · 相同规则', 120, 380, { size: 40, font: KAI, alpha: k, ls: 4 });
+      text('初始条件固定 → 上限', 120 + 60, by + 66, { size: 30, font: SONG, color: 'rgba(239,232,220,.6)', alpha: seg(t, T.concl - 4, T.concl - 3) });
+      text('放开随机项 → 落点', 120 + 560, by + 66, { size: 30, font: SONG, color: 'rgba(192,70,44,.9)', alpha: seg(t, T.concl - 4, T.concl - 3) });
+      text('上限由初始条件决定 · 落点由随机项决定', 120, 900, { size: 44, font: SONG, color: PAPER, alpha: seg(t, T.concl - 2.4, T.concl - 1) });
+    }
+  }
+  function ch5(t) {
+    bg(t, 'rgba(40,40,44,.5)');
+    if (t < T.code) return;
+    // 浮点误差放大：1e-16 起逐帧翻倍
+    const k = seg(t, T.code, T.code + 5);
+    const rows = 14, cols = 34;
+    const gen = 1e-16 * Math.pow(2, (t - T.code) * 4);
+    ctx.save();
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const R = rng(r * 91 + c * 7 + 3);
+      const noisy = Math.min(1, gen * (0.4 + R()));
+      ctx.globalAlpha = 0.10 + noisy * 0.9;
+      ctx.fillStyle = R() < noisy ? ZHU : 'rgba(239,232,220,.5)';
+      ctx.font = `22px ${MONO}`;
+      ctx.fillText(R() < 0.5 ? '1' : '0', 130 + c * 26, 420 + r * 42);
+    }
+    ctx.restore();
+    text(`误差 1e-16 → ${gen.toExponential(1)}`, 120, 320, { size: 30, font: MONO, color: GOLD });
+    text('命运是一段代码', 92, 1120, { size: 72, font: KAI, alpha: seg(t, T.code + 1, T.code + 2.4), ls: 8 });
+    text('语法是确定的，浮点是不可预测的', 92, 1220, { size: 40, font: SONG, color: 'rgba(239,232,220,.7)', alpha: seg(t, T.code + 2.6, T.code + 3.8), ls: 2 });
+    const th = [['① 初始条件', '出生、时代、身体 —— 改不了'], ['② 方程与规律', '物理、社会、概率 —— 也改不了'], ['③ 步长与方向', '你每次选择，都在改它'], ];
+    th.forEach((it, i) => {
+      const y = 1300 + i * 130, kk = seg(t, T.three + i * 2.4, T.three + 1.2 + i * 2.4);
+      text(it[0], 120, y, { size: 50, font: KAI, color: i === 2 ? ZHU : PAPER, alpha: kk, ls: 4 });
+      text(it[1], 420, y, { size: 32, font: SONG, color: 'rgba(239,232,220,.66)', alpha: kk });
+    });
+  }
+  function ending(t) {
+    bg(t, 'rgba(52,32,22,.6)');
+    const k = seg(t, T.classic, T.classic + 2);
+    text('制天命而用之', W / 2 - 220, 820, { size: 116, font: KAI, color: PAPER, alpha: k, ls: 18 });
+    text('《荀子·天论》· 公元前 3 世纪', W / 2 - 218, 910, { size: 32, font: SONG, color: 'rgba(239,232,220,.6)', alpha: seg(t, T.classic + 1.4, T.classic + 2.6) });
+    const k2 = seg(t, T.end - 4.4, T.end - 2.2);
+    text('命运是一段跑不完的代码', 92, 1300, { size: 58, font: KAI, alpha: k2, ls: 6 });
+    text('你改不了初始条件，但可以改步长', 92, 1388, { size: 40, font: SONG, color: 'rgba(239,232,220,.72)', alpha: seg(t, T.end - 3.2, T.end - 1.6), ls: 2 });
+    ctx.save();
+    const s = 120, sx = W - 92 - s, sy = 1080, rot = -0.1;
+    ctx.globalAlpha = k2; ctx.translate(sx + s / 2, sy + s / 2); ctx.rotate(rot);
+    ctx.fillStyle = ZHU; ctx.fillRect(-s / 2, -s / 2, s, s);
+    text('命运', -s / 2 + 16, 18, { size: 52, font: KAI, color: '#fdf8ef' });
+    ctx.restore();
+  }
+
+  // ── 主绘制 ──
+  function draw(t) {
+    if (t < T.laplace) ch1(t);
+    else if (t < T.sand) ch2(t) , ch3(t) === undefined ? null : null;
+    else if (t < T.code) ch4(t);
+    else if (t < T.classic) ch5(t);
+    else ending(t);
+    if (t >= T.laplace) { /* 章节角标与字幕统一叠加 */ }
+    sub(t); yearTag(t); progress(t);
+    // 章节名（右上）
+    const chs = [[0, '一章 · 提问'], [T.laplace, '二章 · 决定论'], [T.twin, '三章 · 混沌'], [T.sand, '四章 · 临界与概率'], [T.code, '五章 · 代码']];
+    let cur = chs[0];
+    for (const c of chs) if (t >= c[0]) cur = c;
+    text(cur[1], W - 92, 118, { size: 26, font: SONG, color: 'rgba(239,232,220,.5)', align: 'right', ls: 2 });
+  }
+
+  // 章节绘图分派（ch2/ch3 同属"决定论—混沌"段，按时间细分）
+  const drawReal = draw;
+  function render(t) {
+    ctx.fillStyle = INK; ctx.fillRect(0, 0, W, H);
+    if (t < T.laplace) ch1(t);
+    else if (t < T.twin) ch2(t);
+    else if (t < T.sand) ch3(t);
+    else if (t < T.code) ch4(t);
+    else if (t < T.classic) ch5(t);
+    else ending(t);
+    sub(t); yearTag(t); progress(t);
+    const chs = [[0, '一章 · 提问'], [T.laplace, '二章 · 决定论'], [T.twin, '三章 · 混沌'], [T.sand, '四章 · 临界与概率'], [T.code, '五章 · 代码']];
+    let cur = chs[0];
+    for (const c of chs) if (t >= c[0]) cur = c;
+    text(cur[1], W - 92, 118, { size: 26, font: SONG, color: 'rgba(239,232,220,.5)', align: 'right', ls: 2 });
+  }
+
+  // ── 对外 API（逐帧驱动）──
+  const beats = [
+    { t: 2.0, k: 'type' }, { t: 6.4, k: 'whoosh' }, { t: 22.4, k: 'whoosh' }, { t: 30.4, k: 'whoosh' },
+    { t: 60.4, k: 'tick' }, { t: 64.6, k: 'tick' }, { t: 85.0, k: 'rise' }, { t: 92.6, k: 'tick' },
+    { t: 108.8, k: 'rise' }, { t: 112.4, k: 'tick' },
+    { t: 126.4, k: 'whoosh' }, { t: 134.8, k: 'rise' }, { t: 150.4, k: 'whoosh' }, { t: 158.8, k: 'tick' },
+    { t: 176.4, k: 'rise' }, { t: 192.4, k: 'tick' }, { t: 200.8, k: 'rise' }, { t: 204.8, k: 'gong' },
+  ];
+  window.__film = {
+    ready: false, dur: DUR, fps: FPS, beats, title: '命运',
+    setTime: (t) => { render(Math.max(0, Math.min(DUR, t))); return true; },
+  };
+  try { document.fonts.ready.then(() => { render(0); window.__film.ready = true; }); }
+  catch { render(0); window.__film.ready = true; }
+})();
+</script>
+</body>
+</html>
