@@ -447,8 +447,8 @@
   function ending(t) {
     bg(t, 'rgba(52,32,22,.6)');
     const k = seg(t, T.classic, T.classic + 2);
-    text('制天命而用之', W / 2 - 220, 820, { size: 116, font: KAI, color: PAPER, alpha: k, ls: 18 });
-    text('《荀子·天论》· 公元前 3 世纪', W / 2 - 218, 910, { size: 32, font: SONG, color: 'rgba(239,232,220,.6)', alpha: seg(t, T.classic + 1.4, T.classic + 2.6) });
+    text('制天命而用之', W / 2, 820, { size: 104, font: KAI, color: PAPER, alpha: k, ls: 16, align: 'center' });
+    text('《荀子·天论》· 公元前 3 世纪', W / 2, 912, { size: 32, font: SONG, color: 'rgba(239,232,220,.6)', alpha: seg(t, T.classic + 1.4, T.classic + 2.6), align: 'center' });
     const k2 = seg(t, T.end - 4.4, T.end - 2.2);
     text('命运是一段跑不完的代码', 92, 1300, { size: 58, font: KAI, alpha: k2, ls: 6 });
     text('你改不了初始条件，但可以改步长', 92, 1388, { size: 40, font: SONG, color: 'rgba(239,232,220,.72)', alpha: seg(t, T.end - 3.2, T.end - 1.6), ls: 2 });
